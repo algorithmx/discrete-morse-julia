@@ -349,21 +349,6 @@ function test_surface_generation()
     return [(verts1, tris1), (verts2, tris2), (verts3, tris3), (verts4, tris4), (verts5, tris5)]
 end
 
-"""
-Create a simple test surface for immediate use with critical point detection.
-"""
-function create_simple_test_surface()
-    println("Creating simple test surface with known critical points...")
-
-    # Generate a small sinusoidal surface
-    vertices, triangles = generate_sinusoidal_surface(10, 10, width=6.0, height=6.0)
-
-    # Extract scalar field (z-coordinates)
-    scalar_field = vertices[3, :]
-
-    return vertices, triangles, scalar_field
-end
-
 # Run test if this file is executed directly
 if abspath(PROGRAM_FILE) == @__FILE__
     test_surface_generation()

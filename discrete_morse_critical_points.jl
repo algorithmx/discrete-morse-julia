@@ -161,6 +161,312 @@ struct TriangleMesh
 end
 
 # ==============================================================================
+# ORDER DISAMBIGUATION (SoS) — port of TTK core/base/common/OrderDisambiguation.h
+# ==============================================================================
+
+"""
+Sort vertices according to scalars disambiguated by offsets (SoS).
+
+This mirrors ttk::sortVertices in core/base/common/OrderDisambiguation.h:
+- primary key: scalar value (ascending)
+- tie-breaker: offsets[a] < offsets[b] when provided, otherwise index a < b
+
+Returns an `order` array where order[v] is the rank of vertex v in ascending
+order of (scalar, tie-breaker), 1-based to match Julia indexing.
+"""
+function sort_vertices_order(scalars::AbstractVector{T},
+                             offsets::Union{AbstractVector{Int},Nothing}) where {T<:Real}
+    nVerts = length(scalars)
+    sortedVertices = collect(1:nVerts)
+    if offsets !== nothing
+        sort!(sortedVertices, by = i -> (scalars[i], offsets[i]))
+    else
+        # Match C++ fallback: tie-break by vertex id
+        sort!(sortedVertices, by = i -> (scalars[i], i))
+    end
+    order = Vector{Int}(undef, nVerts)
+    @inbounds for (rank, v) in enumerate(sortedVertices)
+        order[v] = rank
+    end
+    return order
+end
+
+"""
+Precondition an order array to be consumed by the base layer API.
+
+Equivalent of ttk::preconditionOrderArray: compute total order by scalar with
+index as tie-breaker (no external SoS).
+"""
+function precondition_order_array(scalars::AbstractVector{T}) where {T<:Real}
+    return sort_vertices_order(scalars, nothing)
+end
+
+# ==============================================================================
+# PERSISTENCE PAIRS (0–1 and 1–2) — union-find like TTK PersistenceDiagram
+# ==============================================================================
+
+# Pair types, mirroring ttk::lts::LocalizedTopologicalSimplification::PAIR_TYPE
+const PAIR_MINIMUM_SADDLE = 1  # MINIMUM_SADDLE
+const PAIR_MAXIMUM_SADDLE = 2  # MAXIMUM_SADDLE
+
+struct PersistencePair
+    pair_type::Int      # PAIR_MINIMUM_SADDLE or PAIR_MAXIMUM_SADDLE
+    extremum::Int       # vertex id of minimum (for MINIMUM_SADDLE) or maximum (for MAXIMUM_SADDLE)
+    saddle_edge::Int    # edge id (1-saddle)
+    birth_value::Float64
+    death_value::Float64
+    persistence::Float64
+end
+
+"""
+Simple union-find (disjoint set) with component birth tracking (elder rule).
+"""
+mutable struct UnionFind
+    parent::Vector{Int}
+    rank::Vector{Int}
+    comp_birth_vertex::Vector{Int}  # representative vertex at birth (minimum or maximum)
+end
+
+function UnionFind(n::Int)
+    parent = collect(1:n)
+    rank = fill(0, n)
+    comp_birth_vertex = collect(1:n)
+    return UnionFind(parent, rank, comp_birth_vertex)
+end
+
+function uf_find!(uf::UnionFind, x::Int)
+    p = uf.parent[x]
+    if p != x
+        uf.parent[x] = uf_find!(uf, p)
+    end
+    return uf.parent[x]
+end
+
+function uf_union_elder!(uf::UnionFind, a::Int, b::Int, birth_order::AbstractVector{Int})
+    ra = uf_find!(uf, a)
+    rb = uf_find!(uf, b)
+    if ra == rb
+        return ra
+    end
+    # elder = component with older birth (smaller order)
+    elder = (birth_order[uf.comp_birth_vertex[ra]] <= birth_order[uf.comp_birth_vertex[rb]]) ? ra : rb
+    other = (elder == ra) ? rb : ra
+    # union by rank under elder
+    if uf.rank[elder] < uf.rank[other]
+        elder, other = other, elder
+    end
+    uf.parent[other] = elder
+    if uf.rank[elder] == uf.rank[other]
+        uf.rank[elder] += 1
+    end
+    # the elder's birth vertex remains
+    return elder
+end
+
+"""
+Build vertex neighbors (1-ring) from mesh connectivity.
+"""
+function build_vertex_neighbors(mesh::TriangleMesh)
+    n = size(mesh.vertices, 2)
+    neigh = [Int[] for _ in 1:n]
+    for e in 1:size(mesh.edge_vertices, 2)
+        u, v = mesh.edge_vertices[:, e]
+        push!(neigh[u], v)
+        push!(neigh[v], u)
+    end
+    return neigh
+end
+
+"""
+Compute 0D persistence pairs between minima and 1-saddles (edges) via elder rule.
+Pairing semantics:
+- iterate vertices by ascending (scalar, SoS)
+- at each vertex v, consider lower neighbors (with lower order)
+- among distinct neighbor components, keep the elder component; each other component C forms a pair
+  (min of C, saddle edge (v, any u in C)), with death at f(v).
+
+Returns a vector of PersistencePair of type PAIR_MINIMUM_SADDLE.
+"""
+function compute_persistence_pairs_min_sad(mesh::TriangleMesh,
+                                           scalars::AbstractVector{<:Real},
+                                           order::AbstractVector{Int})
+    n = length(scalars)
+    neigh = build_vertex_neighbors(mesh)
+    # map vertex id to its position in the sorted order (1..n)
+    invOrder = order
+    # vertices sorted ascending by order
+    verts_sorted = sort(collect(1:n), by = i -> invOrder[i])
+    uf = UnionFind(n)
+    active = falses(n)
+    # track which component each active vertex currently belongs to
+    pairs = PersistencePair[]
+
+    for v in verts_sorted
+        active[v] = true
+        uf.comp_birth_vertex[v] = v
+        # gather neighbors that are already active and have lower order
+        comps = Dict{Int,Int}()  # root -> sample neighbor vertex in that comp
+        for u in neigh[v]
+            if active[u] && invOrder[u] < invOrder[v]
+                r = uf_find!(uf, u)
+                comps[r] = u
+            end
+        end
+        if isempty(comps)
+            # new component born at v (minimum)
+            continue
+        end
+        # choose elder component to survive
+        roots = collect(keys(comps))
+        elder = roots[1]
+        for r in roots[2:end]
+            if invOrder[uf.comp_birth_vertex[r]] < invOrder[uf.comp_birth_vertex[elder]]
+                elder = r
+            end
+        end
+        # pair all other components with current vertex v (death)
+        for r in roots
+            if r == elder; continue; end
+            minVertex = uf.comp_birth_vertex[r]
+            # find an edge (v, u) that connects to this component
+            u = comps[r]
+            # retrieve edge id for (v,u)
+            edge_id = -1
+            # lookup via mesh.vertex_to_edges
+            for e in mesh.vertex_to_edges[v]
+                a, b = mesh.edge_vertices[:, e]
+                if (a == v && b == u) || (a == u && b == v)
+                    edge_id = e
+                    break
+                end
+            end
+            if edge_id == -1
+                continue  # should not happen
+            end
+            birth = float(scalars[minVertex])
+            death = float(scalars[v])
+            push!(pairs, PersistencePair(PAIR_MINIMUM_SADDLE, minVertex, edge_id, birth, death, death - birth))
+        end
+        # merge all components with elder
+        for r in roots
+            uf_union_elder!(uf, elder, r, invOrder)
+        end
+        # finally union v into elder as well
+        uf_union_elder!(uf, elder, v, invOrder)
+    end
+
+    return pairs
+end
+
+"""
+Compute 2D dual pairs (maxima with 1-saddles) by applying the same procedure
+to the superlevel sets (i.e., run on -scalars). Returns PAIR_MAXIMUM_SADDLE pairs.
+"""
+function compute_persistence_pairs_max_sad(mesh::TriangleMesh,
+                                           scalars::AbstractVector{<:Real},
+                                           order::AbstractVector{Int})
+    neg = [-float(s) for s in scalars]
+    # reuse the same order on vertices to disambiguate ties consistently with TTK
+    pairs0 = compute_persistence_pairs_min_sad(mesh, neg, order)
+    # convert type to MAXIMUM_SADDLE and flip birth/death signs back
+    pairs = PersistencePair[]
+    for p in pairs0
+        birth = -p.birth_value
+        death = -p.death_value
+        push!(pairs, PersistencePair(PAIR_MAXIMUM_SADDLE, p.extremum, p.saddle_edge, birth, death, birth - death))
+    end
+    return pairs
+end
+
+"""
+Filter critical points using a persistence threshold:
+- remove minima that appear in MINIMUM_SADDLE pairs with persistence < tau
+- remove saddles that appear in any pair (min or max) with persistence < tau
+Maxima (triangles) are left untouched to avoid breaking Morse/Euler counts
+without recomputing the gradient.
+"""
+function filter_critical_by_persistence!(minima::Vector{Int}, saddles::Vector{Int}, maxima::Vector{Int},
+                                         mesh::TriangleMesh,
+                                         scalars::AbstractVector{<:Real},
+                                         order::AbstractVector{Int},
+                                         tau::Real # persistence_threshold
+)
+    if tau <= 0
+        return
+    end
+    pairs_min = compute_persistence_pairs_min_sad(mesh, scalars, order)
+
+    # collect to-remove sets
+    rm_min = Set{Int}()
+    rm_sad = Set{Int}()
+    for p in pairs_min
+        if p.persistence < tau
+            push!(rm_min, p.extremum)
+            push!(rm_sad, p.saddle_edge)
+        end
+    end
+    # Do NOT remove saddles for max-saddle pairs without rebuilding the gradient,
+    # since maxima in discrete Morse are 2-cells (triangles) and a direct mapping
+    # from vertex maxima to triangle maxima is non-trivial. Rebuilding handles this.
+
+    # filter vectors in-place
+    filter!((v)->!(v in rm_min), minima)
+    filter!((e)->!(e in rm_sad), saddles)
+    # leave maxima as-is for consistency
+    return
+end
+
+# ==============================================================================
+# TOPOLOGICAL SIMPLIFICATION VIA SCALAR ADJUSTMENT AND REBUILD
+# ==============================================================================
+
+"""
+Simplify the scalar field in-place by canceling pairs below a threshold:
+- For each MINIMUM_SADDLE pair with persistence < tau, raise the minimum's
+  scalar to the pair's death value.
+- For each MAXIMUM_SADDLE pair with persistence < tau, lower the maximum's
+  scalar to the pair's death value.
+
+Returns the list of modified vertex indices.
+This mirrors TTK's LTS intent (local value edits leading to cancellations)
+without the full propagation machinery.
+"""
+function simplify_scalar_field_by_persistence!(mesh::TriangleMesh,
+                                               scalars::Vector{Float64},
+                                               order::AbstractVector{Int},
+                                               tau::Real)
+    if tau <= 0
+        return Int[]
+    end
+    pairs_min = compute_persistence_pairs_min_sad(mesh, scalars, order)
+    pairs_max = compute_persistence_pairs_max_sad(mesh, scalars, order)
+    modified = Set{Int}()
+    for p in pairs_min
+        if p.persistence < tau
+            v = p.extremum
+            # lift minimum to the merge level (death)
+            newv = max(scalars[v], p.death_value)
+            if newv != scalars[v]
+                scalars[v] = newv
+                push!(modified, v)
+            end
+        end
+    end
+    for p in pairs_max
+        if p.persistence < tau
+            v = p.extremum
+            # lower maximum to the merge level (death)
+            newv = min(scalars[v], p.death_value)
+            if newv != scalars[v]
+                scalars[v] = newv
+                push!(modified, v)
+            end
+        end
+    end
+    return collect(modified)
+end
+
+# ==============================================================================
 # CORE ALGORITHM FUNCTIONS
 # ==============================================================================
 
@@ -518,14 +824,16 @@ minima, saddles, maxima, gradient = find_critical_points_discrete_morse(mesh, sc
 
 println("Found \$(length(minima)) minima, \$(length(saddles)) saddles, \$(length(maxima)) maxima")
 """
-function find_critical_points_discrete_morse(mesh::TriangleMesh, scalar_field::Vector{Float64})
-    # Compute orderings (offsets) - sort vertices by scalar value
-    # Matches C++ TTK offset computation
-    vertex_order = sortperm(scalar_field)
-    offsets = zeros(Int, length(scalar_field))
-    for (new_id, old_id) in enumerate(vertex_order)
-        offsets[old_id] = new_id
-    end
+function find_critical_points_discrete_morse(
+    mesh::TriangleMesh,
+    scalar_field::AbstractVector{<:Real};
+    sos_offsets::Union{Nothing,AbstractVector{Int}}=nothing,
+    persistence_threshold::Real=0.0,
+    rebuild_gradient_after_simplification::Bool=true,
+)
+    # Compute vertex order (offsets) using TTK OrderDisambiguation semantics
+    # Primary: scalar; tie-breaker: provided SoS offsets if given, else vertex id.
+    offsets = sort_vertices_order(scalar_field, sos_offsets)
 
     # Initialize gradient field - matches C++ initMemory
     n_vertices = size(mesh.vertices, 2)
@@ -533,8 +841,17 @@ function find_critical_points_discrete_morse(mesh::TriangleMesh, scalar_field::V
     n_triangles = size(mesh.triangles, 2)
     gradient = GradientField(n_vertices, n_edges, n_triangles)
 
-    # Build discrete gradient field using ProcessLowerStars
-    # Matches C++ processLowerStars call
+    # Optionally perform scalar-field simplification by persistence, then
+    # rebuild offsets and gradient to reflect true topological simplification
+    local_scalars = Vector{Float64}(scalar_field)
+    if persistence_threshold > 0 && rebuild_gradient_after_simplification
+        # adjust scalars in place
+        _ = simplify_scalar_field_by_persistence!(mesh, local_scalars, offsets, persistence_threshold)
+        # recompute order with same SoS tie-breaker (if provided)
+        offsets = sort_vertices_order(local_scalars, sos_offsets)
+    end
+
+    # Build discrete gradient field using ProcessLowerStars with (possibly) updated order
     build_gradient_field!(mesh, offsets, gradient)
 
     # Find critical points - matches C++ getCriticalPoints
@@ -542,6 +859,12 @@ function find_critical_points_discrete_morse(mesh::TriangleMesh, scalar_field::V
 
     # Classify critical points
     minima, saddles, maxima = classify_critical_points(crit_verts, crit_edges, crit_tris, mesh)
+
+    # Optional post-filtering of critical lists (does not change gradient).
+    # If we rebuilt the gradient after simplification, lists should already be cleaner.
+    if persistence_threshold > 0 && !rebuild_gradient_after_simplification
+        filter_critical_by_persistence!(minima, saddles, maxima, mesh, local_scalars, offsets, persistence_threshold)
+    end
 
     return minima, saddles, maxima, gradient
 end

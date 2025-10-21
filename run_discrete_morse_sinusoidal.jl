@@ -3,18 +3,7 @@
 using Printf
 using Random
 using Statistics
-
-# Try to load Plots for visualization; install if missing
-let
-    try
-        @eval using Plots
-    catch err
-        @info "Installing Plots.jl for visualization…" err
-        import Pkg
-        Pkg.add("Plots")
-        @eval using Plots
-    end
-end
+using Plots
 
 # Bring in the algorithm and surface generator
 include(joinpath(@__DIR__, "discrete_morse_critical_points.jl"))
@@ -28,7 +17,13 @@ function draw_heightfield_with_critical_points(
     maxima::Vector{Int},
     nx::Int, ny::Int, width::Float64, height::Float64,
     scalar_field::Vector{Float64};
-    outpath::String="height_crit.png"
+    outpath::String="height_crit.png",
+    # Visualization controls (non-breaking defaults)
+    jitter_frac::Float64=0.0,   # fraction of grid spacing to offset markers (0 disables)
+    fig_size::Tuple{Int,Int}=(900, 800),
+    min_ms::Int=5, sad_ms::Int=5, max_ms::Int=6,
+    min_alpha::Float64=0.95, sad_alpha::Float64=0.95, max_alpha::Float64=0.95,
+    min_sep_frac::Float64=0.0   # visualization-only spatial thinning (0 disables)
 )
     # Reconstruct X/Y axes matching the generator
     xvals = collect(range(0, width, length=nx))
@@ -45,7 +40,8 @@ function draw_heightfield_with_critical_points(
         framestyle=:box,
         xlabel="x",
         ylabel="y",
-        title="Height field with discrete Morse critical points"
+        title="Height field with discrete Morse critical points",
+        size=fig_size
     )
 
     # Gather overlay positions
@@ -67,18 +63,72 @@ function draw_heightfield_with_critical_points(
         push!(xmax, p[1]); push!(ymax, p[2])
     end
 
-    # Overlay scatter plots
-    if !isempty(xmin)
-        scatter!(plt, xmin, ymin; markershape=:circle, markerstrokecolor=:white, markerstrokewidth=0.5,
-                 color=:dodgerblue, label="minima", ms=4)
+    # Compute small class-specific jitter to separate nearly overlapping markers
+    # Jitter is based on grid spacing for intuitive scale; sign differs per class
+    dx = (nx > 1 ? width / (nx - 1) : width)
+    dy = (ny > 1 ? height / (ny - 1) : height)
+    jx = jitter_frac * dx
+    jy = jitter_frac * dy
+
+    # Prepare jittered coordinates per class
+    xminp = copy(xmin); yminp = copy(ymin)
+    xsadp = copy(xsad); ysadp = copy(ysad)
+    xmaxp = copy(xmax); ymaxp = copy(ymax)
+
+    if jitter_frac > 0
+        # Move minima slightly down-left, saddles unchanged, maxima up-right
+        @inbounds for i in eachindex(xminp); xminp[i] -= 0.7*jx; end
+        @inbounds for i in eachindex(yminp); yminp[i] -= 0.7*jy; end
+        # Saddles: small orthogonal nudge to avoid perfect overlap with grid-aligned points
+        @inbounds for i in eachindex(xsadp); xsadp[i] += 0.25*jx; end
+        @inbounds for i in eachindex(ysadp); ysadp[i] -= 0.25*jy; end
+        # Maxima
+        @inbounds for i in eachindex(xmaxp); xmaxp[i] += 0.7*jx; end
+        @inbounds for i in eachindex(ymaxp); ymaxp[i] += 0.7*jy; end
     end
-    if !isempty(xsad)
-        scatter!(plt, xsad, ysad; markershape=:square, markerstrokecolor=:black, markerstrokewidth=0.5,
-                 color=:gold, label="saddles", ms=4)
+
+    # Optional spatial thinning to reduce visual clustering (grid occupancy)
+    function thin_points(x::Vector{Float64}, y::Vector{Float64}, min_sep_x::Float64, min_sep_y::Float64)
+        if isempty(x) || (min_sep_x <= 0 && min_sep_y <= 0)
+            return x, y
+        end
+        kept_x = Float64[]; kept_y = Float64[]
+        occupied = Set{Tuple{Int,Int}}()
+        for i in eachindex(x)
+            col = min_sep_x > 0 ? Int(floor((x[i] - 0.0) / min_sep_x)) : 0
+            row = min_sep_y > 0 ? Int(floor((y[i] - 0.0) / min_sep_y)) : 0
+            key = (col, row)
+            if !(key in occupied)
+                push!(occupied, key)
+                push!(kept_x, x[i])
+                push!(kept_y, y[i])
+            end
+        end
+        return kept_x, kept_y
     end
-    if !isempty(xmax)
-        scatter!(plt, xmax, ymax; markershape=:utriangle, markerstrokecolor=:black, markerstrokewidth=0.5,
-                 color=:red, label="maxima", ms=4)
+
+    # Overlay scatter plots (plot order controls layering)
+    if min_sep_frac > 0
+        # Use grid spacing scaled by fraction for a rectangular thinning grid
+        min_sep_x = min_sep_frac * dx
+        min_sep_y = min_sep_frac * dy
+        xminp, yminp = thin_points(xminp, yminp, min_sep_x, min_sep_y)
+        xsadp, ysadp = thin_points(xsadp, ysadp, min_sep_x, min_sep_y)
+        xmaxp, ymaxp = thin_points(xmaxp, ymaxp, min_sep_x, min_sep_y)
+    end
+
+    # Overlay scatter plots (plot order controls layering after thinning)
+    if !isempty(xminp)
+        scatter!(plt, xminp, yminp; markershape=:circle, markerstrokecolor=:white, markerstrokewidth=0.6,
+                 color=:dodgerblue, label="minima", ms=min_ms, alpha=min_alpha)
+    end
+    if !isempty(xsadp)
+        scatter!(plt, xsadp, ysadp; markershape=:square, markerstrokecolor=:black, markerstrokewidth=0.6,
+                 color=:gold, label="saddles", ms=sad_ms, alpha=sad_alpha)
+    end
+    if !isempty(xmaxp)
+        scatter!(plt, xmaxp, ymaxp; markershape=:utriangle, markerstrokecolor=:black, markerstrokewidth=0.6,
+                 color=:red, label="maxima", ms=max_ms, alpha=max_alpha)
     end
 
     # Save figure
@@ -205,7 +255,17 @@ function main()
     scalar_field = vec(verts[3, :])
 
     # Run discrete Morse critical point detection
-    minima, saddles, maxima, gradient = find_critical_points_discrete_morse(mesh, scalar_field)
+    # Options:
+    # - pass an external SoS offsets vector via sos_offsets=... to mirror TTK setInputOffsets
+    # - enable persistence-based simplification via persistence_threshold=... (e.g., 0.25)
+    #   and set rebuild_gradient_after_simplification=true to rebuild the gradient
+    #   after scalar edits (closer to TTK LTS behavior)
+    minima, saddles, maxima, gradient = find_critical_points_discrete_morse(
+        mesh, scalar_field;
+        # sos_offsets = some_int_vector,
+        persistence_threshold = 0.05,
+        rebuild_gradient_after_simplification = true,
+    )
 
     # Print summary
     print_critical_point_summary(minima, saddles, maxima, mesh)
@@ -217,6 +277,8 @@ function main()
     draw_heightfield_with_critical_points(
         mesh, minima, saddles, maxima,
         nx, ny, width, height, scalar_field;
+        jitter_frac=0.0,
+        min_sep_frac=0.0,
         outpath="sinusoidal_height_crit_random.png"
     )
 

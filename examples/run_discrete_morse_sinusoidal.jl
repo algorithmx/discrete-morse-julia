@@ -165,10 +165,8 @@ function draw_heightfield_with_segmentation_and_critical_points(
     # Base field (ny x nx)
     Z = reshape(scalar_field, nx, ny)'
 
-    # Segmentation reshape and mask (-1 => NaN)
-    segF = Float64.(segmentation)
-    replace!(segF, -1 => NaN)
-    Zseg = reshape(segF, nx, ny)'
+    # Segmentation reshape (integer labels, -1 means unlabeled)
+    L = reshape(segmentation, nx, ny)'
 
     # Base heatmap
     plt = heatmap(
@@ -183,12 +181,34 @@ function draw_heightfield_with_segmentation_and_critical_points(
         colorbar=false,
     )
 
-    # Segmentation overlay as semi-transparent categorical colormap heatmap
-    # Use levels to encourage discrete coloring (IDs are small integers)
-    heatmap!(plt, xvals, yvals, Zseg;
-        color=seg_palette, alpha=seg_alpha,
-        colorbar=false,
-    )
+    # Segmentation boundaries overlay: draw only patch borders (no filled colors)
+    # We draw grid edges where neighboring labels differ and are both valid (>= 0)
+    xlines = Float64[]; ylines = Float64[]
+    # Horizontal neighbors (left-right)
+    @inbounds for j in 1:ny
+        for i in 1:(nx-1)
+            a = L[j,i]; b = L[j,i+1]
+            if a != b && a >= 0 && b >= 0
+                push!(xlines, xvals[i]);   push!(ylines, yvals[j])
+                push!(xlines, xvals[i+1]); push!(ylines, yvals[j])
+                push!(xlines, NaN);        push!(ylines, NaN)
+            end
+        end
+    end
+    # Vertical neighbors (up-down)
+    @inbounds for j in 1:(ny-1)
+        for i in 1:nx
+            a = L[j,i]; b = L[j+1,i]
+            if a != b && a >= 0 && b >= 0
+                push!(xlines, xvals[i]); push!(ylines, yvals[j])
+                push!(xlines, xvals[i]); push!(ylines, yvals[j+1])
+                push!(xlines, NaN);      push!(ylines, NaN)
+            end
+        end
+    end
+    if !isempty(xlines)
+        plot!(plt, xlines, ylines; color=:white, linewidth=1.2, alpha=0.9, label="")
+    end
 
     # Critical points overlays (reuse logic from simpler plot)
     xmin = [mesh.vertices[1, v] for v in minima]

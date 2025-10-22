@@ -4,3 +4,4 @@
 *.csv
 results/
 images/
+.DS_Store

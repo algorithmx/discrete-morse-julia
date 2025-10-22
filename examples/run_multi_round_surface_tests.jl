@@ -37,68 +37,75 @@ end
 
 
 function run_multi_round_tests(; rounds::Int=5,
-    persistence_threshold::Float64=0.05,
     rebuild_gradient_after_simplification::Bool=true,
     build_network::Bool=false,
     save_objs::Bool=true,
     save_images::Bool=true,
     results_dir::String=joinpath(@__DIR__, "results"),
-    resolutions::Vector{Tuple{Int,Int}}=[(48, 48), (96, 96), (128, 128), (160, 160)])
+    resolutions::Vector{Tuple{Int,Int}}=[(48, 48), (96, 96), (128, 128), (160, 160)],
+    per_surface_alpha::Dict{String,Float64}=Dict{String,Float64}(),
+    use_sos_offsets::Bool=true)
 
     # Define surfaces repertoire
+    rand1 = rand() # random phase shift for sinusoidal surface, don't change per round
     surfaces = [
-        (
-            name="eggbox",
-            planar=true,
-            gen=(nx, ny) -> begin
-                width, height = 20.0, 20.0
-                cycles = 6.0
-                generate_sinusoidal_surface(nx, ny, width, height;
-                    frequency1=2π * cycles / width,
-                    frequency2=2π * cycles / height,
-                    amplitude1=3.0,
-                    amplitude2=0.0,
-                    phase_shift=0.0)
-            end,
-            dims=(20.0, 20.0),
-            resolutions=resolutions
-        ),
+        # (
+        #     name="eggbox",
+        #     planar=true,
+        #     gen=(nx, ny) -> begin
+        #         width, height = 20.0, 20.0
+        #         cycles = 6.0
+        #         generate_sinusoidal_surface(nx, ny, width, height;
+        #             frequency1=2π * cycles / width,
+        #             frequency2=2π * cycles / height,
+        #             amplitude1=3.0,
+        #             amplitude2=0.0,
+        #             phase_shift=0.0)
+        #     end,
+        #     dims=(20.0, 20.0),
+        #     resolutions=resolutions,
+        #     alpha=0.0
+        # ),
         (
             name="sinusoidal",
             planar=true,
             gen=(nx, ny) -> generate_sinusoidal_surface(nx, ny, 25.0, 25.0;
-                    frequency1=2π / (25.0 / 2), 
-                    frequency2=2π / (25.0 / 3), 
-                    amplitude1=3.0, 
-                    amplitude2=1.6, 
-                    phase_shift=2π * rand()),
+                frequency1=2π / (25.0 / 2),
+                frequency2=2π / (25.0 / 3),
+                amplitude1=3.0,
+                amplitude2=2.4,
+                phase_shift=2π * rand1),
             dims=(25.0, 25.0),
-            resolutions=resolutions
+            resolutions=resolutions,
+            alpha=0.02
         ),
-        (
-            name="gaussian_bumps",
-            planar=true,
-            gen=(nx, ny) -> generate_gaussian_bumps(nx, ny, 20.0, 20.0;
-                    bump_positions=[(5.0, 5.0), (12.0, 7.0), (15.0, 14.0)], 
-                    bump_heights=[4.2, 2.3, 3.1], 
-                    bump_widths=[1.3, 0.8, 1.1]),
-            dims=(20.0, 20.0),
-            resolutions=resolutions
-        ),
-        (
-            name="saddle",
-            planar=true,
-            gen=(nx, ny) -> generate_saddle_surface(nx, ny, 10.0, 10.0; curvature=0.5),
-            dims=(10.0, 10.0),
-            resolutions=resolutions
-        ),
-        (
-            name="complex",
-            planar=true,
-            gen=(nx, ny) -> generate_complex_surface(nx, ny, 24.0, 24.0),
-            dims=(24.0, 24.0),
-            resolutions=resolutions
-        ),
+        # (
+        #     name="gaussian_bumps",
+        #     planar=true,
+        #     gen=(nx, ny) -> generate_gaussian_bumps(nx, ny, 20.0, 20.0;
+        #             bump_positions=[(5.0, 5.0), (12.0, 7.0), (15.0, 14.0)], 
+        #             bump_heights=[4.2, 2.3, 3.1], 
+        #             bump_widths=[1.3, 0.8, 1.1]),
+        #     dims=(20.0, 20.0),
+        #     resolutions=resolutions,
+        #     alpha=0.05
+        # ),
+        # (
+        #     name="saddle",
+        #     planar=true,
+        #     gen=(nx, ny) -> generate_saddle_surface(nx, ny, 10.0, 10.0; curvature=0.5),
+        #     dims=(10.0, 10.0),
+        #     resolutions=resolutions,
+        #     alpha=0.0
+        # ),
+        # (
+        #     name="complex",
+        #     planar=true,
+        #     gen=(nx, ny) -> generate_complex_surface(nx, ny, 24.0, 24.0),
+        #     dims=(24.0, 24.0),
+        #     resolutions=resolutions,
+        #     alpha=0.03
+        # ),
     ]
 
     results = RunResult[]
@@ -127,12 +134,20 @@ function run_multi_round_tests(; rounds::Int=5,
             mesh = TriangleMesh(verts, tris1)
             scalar_field = vec(verts[3, :])
 
+            # Compute per-surface persistence threshold from alpha and data range
+            data_min = minimum(scalar_field)
+            data_max = maximum(scalar_field)
+            data_range = data_max - data_min
+            alpha = haskey(per_surface_alpha, s.name) ? per_surface_alpha[s.name] : s.alpha
+            pth = alpha * data_range
+
             t0 = time_ns()
             results_ms = compute_surface_morse_smale_from_scalar(
                 mesh, scalar_field;
-                persistence_threshold=persistence_threshold,
+                persistence_threshold=pth,
                 rebuild_gradient_after_simplification=rebuild_gradient_after_simplification,
                 build_network=build_network,
+                sos_offsets=use_sos_offsets ? collect(1:length(scalar_field)) : nothing,
             )
             elapsed_ms = Int(Base.round((time_ns() - t0) / 1e6))
 
@@ -207,7 +222,11 @@ function run_multi_round_tests(; rounds::Int=5,
 end
 
 function main()
-    run_multi_round_tests(; rounds=5, persistence_threshold=0.05, rebuild_gradient_after_simplification=true, build_network=false, save_objs=true)
+    # Note: For surfaces with large flat plateaus (e.g., gaussian_bumps),
+    # persistence-based scalar simplification may be a no-op (pairs have 0 persistence).
+    # In that case, set rebuild_gradient_after_simplification=false to enable
+    # post-filtering of critical points by persistence without rebuilding the gradient.
+    run_multi_round_tests(; rounds=5, rebuild_gradient_after_simplification=false, build_network=false, save_objs=true)
     println("\nDone.")
 end
 

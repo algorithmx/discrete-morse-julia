@@ -6,7 +6,9 @@ using Statistics
 using Plots
 
 # Bring in the algorithm and surface generator
-include(joinpath(@__DIR__, "discrete_morse_critical_points.jl"))
+# Note: files live one level up from examples/
+include(joinpath(@__DIR__, "..", "discrete_morse_critical_points.jl"))
+include(joinpath(@__DIR__, "..", "morse_smale_surface_segmentation.jl"))
 include(joinpath(@__DIR__, "test_surface_generator.jl"))
 
 # Render a heatmap (height field) and overlay detected critical points
@@ -136,6 +138,134 @@ function draw_heightfield_with_critical_points(
     println("Saved overlay plot to $(outpath)")
 end
 
+# Render a heatmap (height field) with an additional semi-transparent segmentation overlay
+# and overlay detected critical points
+function draw_heightfield_with_segmentation_and_critical_points(
+    mesh::TriangleMesh,
+    minima::Vector{Int},
+    saddles::Vector{Int},
+    maxima::Vector{Int},
+    nx::Int, ny::Int, width::Float64, height::Float64,
+    scalar_field::Vector{Float64},
+    segmentation::Vector{Int};
+    outpath::String="height_seg_crit.png",
+    # Visualization controls
+    seg_alpha::Float64=0.35,
+    seg_palette=:tab20,
+    jitter_frac::Float64=0.0,
+    fig_size::Tuple{Int,Int}=(900, 800),
+    min_ms::Int=5, sad_ms::Int=5, max_ms::Int=6,
+    min_alpha::Float64=0.95, sad_alpha::Float64=0.95, max_alpha::Float64=0.95,
+    min_sep_frac::Float64=0.0
+)
+    # Axes
+    xvals = collect(range(0, width, length=nx))
+    yvals = collect(range(0, height, length=ny))
+
+    # Base field (ny x nx)
+    Z = reshape(scalar_field, nx, ny)'
+
+    # Segmentation reshape and mask (-1 => NaN)
+    segF = Float64.(segmentation)
+    replace!(segF, -1 => NaN)
+    Zseg = reshape(segF, nx, ny)'
+
+    # Base heatmap
+    plt = heatmap(
+        xvals, yvals, Z,
+        aspect_ratio=:equal,
+        color=:viridis,
+        framestyle=:box,
+        xlabel="x",
+        ylabel="y",
+        title="Height field, segmentation and discrete Morse critical points",
+        size=fig_size,
+        colorbar=false,
+    )
+
+    # Segmentation overlay as semi-transparent categorical colormap heatmap
+    # Use levels to encourage discrete coloring (IDs are small integers)
+    heatmap!(plt, xvals, yvals, Zseg;
+        color=seg_palette, alpha=seg_alpha,
+        colorbar=false,
+    )
+
+    # Critical points overlays (reuse logic from simpler plot)
+    xmin = [mesh.vertices[1, v] for v in minima]
+    ymin = [mesh.vertices[2, v] for v in minima]
+    xsad = Float64[]; ysad = Float64[]
+    for e in saddles
+        p = get_critical_point_location(Cell(1, e), mesh)
+        push!(xsad, p[1]); push!(ysad, p[2])
+    end
+    xmax = Float64[]; ymax = Float64[]
+    for t in maxima
+        p = get_critical_point_location(Cell(2, t), mesh)
+        push!(xmax, p[1]); push!(ymax, p[2])
+    end
+
+    # Jitter
+    dx = (nx > 1 ? width / (nx - 1) : width)
+    dy = (ny > 1 ? height / (ny - 1) : height)
+    jx = jitter_frac * dx
+    jy = jitter_frac * dy
+    xminp = copy(xmin); yminp = copy(ymin)
+    xsadp = copy(xsad); ysadp = copy(ysad)
+    xmaxp = copy(xmax); ymaxp = copy(ymax)
+    if jitter_frac > 0
+        @inbounds for i in eachindex(xminp); xminp[i] -= 0.7*jx; end
+        @inbounds for i in eachindex(yminp); yminp[i] -= 0.7*jy; end
+        @inbounds for i in eachindex(xsadp); xsadp[i] += 0.25*jx; end
+        @inbounds for i in eachindex(ysadp); ysadp[i] -= 0.25*jy; end
+        @inbounds for i in eachindex(xmaxp); xmaxp[i] += 0.7*jx; end
+        @inbounds for i in eachindex(ymaxp); ymaxp[i] += 0.7*jy; end
+    end
+
+    # Optional thinning
+    function thin_points(x::Vector{Float64}, y::Vector{Float64}, min_sep_x::Float64, min_sep_y::Float64)
+        if isempty(x) || (min_sep_x <= 0 && min_sep_y <= 0)
+            return x, y
+        end
+        kept_x = Float64[]; kept_y = Float64[]
+        occupied = Set{Tuple{Int,Int}}()
+        for i in eachindex(x)
+            col = min_sep_x > 0 ? Int(floor((x[i] - 0.0) / min_sep_x)) : 0
+            row = min_sep_y > 0 ? Int(floor((y[i] - 0.0) / min_sep_y)) : 0
+            key = (col, row)
+            if !(key in occupied)
+                push!(occupied, key)
+                push!(kept_x, x[i])
+                push!(kept_y, y[i])
+            end
+        end
+        return kept_x, kept_y
+    end
+
+    if min_sep_frac > 0
+        min_sep_x = min_sep_frac * dx
+        min_sep_y = min_sep_frac * dy
+        xminp, yminp = thin_points(xminp, yminp, min_sep_x, min_sep_y)
+        xsadp, ysadp = thin_points(xsadp, ysadp, min_sep_x, min_sep_y)
+        xmaxp, ymaxp = thin_points(xmaxp, ymaxp, min_sep_x, min_sep_y)
+    end
+
+    if !isempty(xminp)
+        scatter!(plt, xminp, yminp; markershape=:circle, markerstrokecolor=:white, markerstrokewidth=0.6,
+                 color=:dodgerblue, label="minima", ms=min_ms, alpha=min_alpha)
+    end
+    if !isempty(xsadp)
+        scatter!(plt, xsadp, ysadp; markershape=:square, markerstrokecolor=:black, markerstrokewidth=0.6,
+                 color=:gold, label="saddles", ms=sad_ms, alpha=sad_alpha)
+    end
+    if !isempty(xmaxp)
+        scatter!(plt, xmaxp, ymaxp; markershape=:utriangle, markerstrokecolor=:black, markerstrokewidth=0.6,
+                 color=:red, label="maxima", ms=max_ms, alpha=max_alpha)
+    end
+
+    savefig(plt, outpath)
+    println("Saved segmentation+overlay plot to $(outpath)")
+end
+
 """
 Generate a randomized smooth height field using a sum of random sinusoidal components
 plus a few random Gaussian bumps, then normalize.
@@ -254,18 +384,27 @@ function main()
     # Scalar field: z-coordinate
     scalar_field = vec(verts[3, :])
 
-    # Run discrete Morse critical point detection
+    # Discrete Morse + Segmentation end-to-end
     # Options:
     # - pass an external SoS offsets vector via sos_offsets=... to mirror TTK setInputOffsets
     # - enable persistence-based simplification via persistence_threshold=... (e.g., 0.25)
     #   and set rebuild_gradient_after_simplification=true to rebuild the gradient
     #   after scalar edits (closer to TTK LTS behavior)
-    minima, saddles, maxima, gradient = find_critical_points_discrete_morse(
+    results = compute_surface_morse_smale_from_scalar(
         mesh, scalar_field;
         # sos_offsets = some_int_vector,
         persistence_threshold = 0.05,
         rebuild_gradient_after_simplification = true,
+        build_network = false,
     )
+
+    minima = results.minima
+    saddles = results.saddles
+    maxima = results.maxima
+    gradient = results.gradient
+    asc_labels = results.segmentation.ascending_
+    desc_labels = results.segmentation.descending_
+    ms_labels = results.segmentation.morseSmale_
 
     # Print summary
     print_critical_point_summary(minima, saddles, maxima, mesh)
@@ -273,16 +412,18 @@ function main()
     # Optionally save the surface for visualization (use original 0-based triangles so OBJ writer adds +1 correctly)
     save_mesh_obj(verts, tris0, "sinusoidal_surface_random.obj")
 
-    # Draw 2D heatmap with critical points overlay
-    draw_heightfield_with_critical_points(
+    # Draw 2D heatmap with segmentation + critical points overlay (final MS segmentation)
+    draw_heightfield_with_segmentation_and_critical_points(
         mesh, minima, saddles, maxima,
-        nx, ny, width, height, scalar_field;
+        nx, ny, width, height, scalar_field, ms_labels;
         jitter_frac=0.0,
         min_sep_frac=0.0,
-        outpath="sinusoidal_height_crit_random.png"
+        seg_alpha=0.35,
+        seg_palette=:tab20,
+        outpath="sinusoidal_height_seg_crit_random.png",
     )
 
-    println("\nDone. OBJ saved as sinusoidal_surface_random.obj and plot saved as sinusoidal_height_crit_random.png")
+    println("\nDone. OBJ saved as sinusoidal_surface_random.obj and plot saved as sinusoidal_height_seg_crit_random.png")
 end
 
 if abspath(PROGRAM_FILE) == @__FILE__

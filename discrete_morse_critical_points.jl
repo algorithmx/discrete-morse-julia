@@ -278,6 +278,66 @@ function build_vertex_neighbors(mesh::TriangleMesh)
 end
 
 """
+Flood-fill vertices in the connected component of `start` using a threshold predicate.
+
+Parameters:
+- `mode`: :below for sublevel-set flood (scalar < threshold)
+          :above for superlevel-set flood (scalar > threshold)
+
+Returns the list of visited vertex indices.
+"""
+function flood_component_vertices(mesh::TriangleMesh,
+                                  scalars::AbstractVector{<:Real},
+                                  start::Int,
+                                  threshold::Float64,
+                                  mode::Symbol,
+                                  neigh::Union{Nothing,Vector{Vector{Int}}}=nothing)
+    neigh === nothing && (neigh = build_vertex_neighbors(mesh))
+    n = length(scalars)
+    visited = falses(n)
+    q = Int[]
+
+    # Early exit if start does not satisfy predicate
+    if mode === :below
+        if !(scalars[start] < threshold)
+            return Int[]
+        end
+    elseif mode === :above
+        if !(scalars[start] > threshold)
+            return Int[]
+        end
+    else
+        error("Unsupported flood mode: $mode")
+    end
+
+    push!(q, start)
+    visited[start] = true
+    comp = Int[]
+
+    while !isempty(q)
+        v = pop!(q)
+        push!(comp, v)
+        for u in neigh[v]
+            if !visited[u]
+                if mode === :below
+                    if scalars[u] < threshold
+                        visited[u] = true
+                        push!(q, u)
+                    end
+                else # :above
+                    if scalars[u] > threshold
+                        visited[u] = true
+                        push!(q, u)
+                    end
+                end
+            end
+        end
+    end
+
+    return comp
+end
+
+"""
 Compute 0D persistence pairs between minima and 1-saddles (edges) via elder rule.
 Pairing semantics:
 - iterate vertices by ascending (scalar, SoS)
@@ -441,28 +501,44 @@ function simplify_scalar_field_by_persistence!(mesh::TriangleMesh,
     pairs_min = compute_persistence_pairs_min_sad(mesh, scalars, order)
     pairs_max = compute_persistence_pairs_max_sad(mesh, scalars, order)
     modified = Set{Int}()
+
+    # Reuse neighbors for all floods
+    neigh = build_vertex_neighbors(mesh)
+
+    # Process minima cancellations first (in increasing death value)
+    sort!(pairs_min, by = p -> p.death_value)
     for p in pairs_min
         if p.persistence < tau
-            v = p.extremum
-            # lift minimum to the merge level (death)
-            newv = max(scalars[v], p.death_value)
-            if newv != scalars[v]
-                scalars[v] = newv
-                push!(modified, v)
+            # flood sublevel component strictly below the merge level (death)
+            comp = flood_component_vertices(mesh, scalars, p.extremum, p.death_value, :below, neigh)
+            if !isempty(comp)
+                for v in comp
+                    if scalars[v] < p.death_value
+                        scalars[v] = p.death_value
+                        push!(modified, v)
+                    end
+                end
             end
         end
     end
+
+    # Then process maxima cancellations (in increasing death value)
+    sort!(pairs_max, by = p -> p.death_value)
     for p in pairs_max
         if p.persistence < tau
-            v = p.extremum
-            # lower maximum to the merge level (death)
-            newv = min(scalars[v], p.death_value)
-            if newv != scalars[v]
-                scalars[v] = newv
-                push!(modified, v)
+            # flood superlevel component strictly above the merge level (death)
+            comp = flood_component_vertices(mesh, scalars, p.extremum, p.death_value, :above, neigh)
+            if !isempty(comp)
+                for v in comp
+                    if scalars[v] > p.death_value
+                        scalars[v] = p.death_value
+                        push!(modified, v)
+                    end
+                end
             end
         end
     end
+
     return collect(modified)
 end
 

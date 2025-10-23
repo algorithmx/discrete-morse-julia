@@ -145,25 +145,19 @@ High-level verdict: The Julia code captures the core ProcessLowerStars mechanics
 
 - Theoretical algorithmic complexity (per ProcessLowerStars) is O(sum over vertices of star size × log star size) with priority queues. The Julia implementation adds an O(n_tris) factor per vertex due to the brute-force triangle scan.
 
-## Validation aids in Julia
-
-- Test harness:
-  - `test_critical_point_detection()` builds a simple mesh and scalar field, then prints a summary, including an Euler characteristic cross-check: χ_topo = V − E + F and χ_Morse = |minima| − |saddles| + |maxima|. This is a solid sanity check; a ✓/✗ indicator is printed.
-- Recommendation: Add a few minimal unit tests comparing expected counts on canonical meshes (single triangle, square split into two triangles, small grids) and, if possible, compare against TTK outputs on identical inputs to quantify any queue-order-induced differences.
-
 ## Gaps vs. C++ and recommendations for tighter compliance
 
-1. Heap polarity and order determinism
-   - Difference: Julia uses a min-heap under lexicographic lt; TTK likely uses a max-heap via `std::less` + `operator<`.
-   - Impact: May produce different—but valid—pairings; different counts are unlikely, but specific pairings can differ.
-   - Action: Flip ordering to match TTK’s top-of-queue semantics to improve deterministic parity.
+1. Heap polarity and order determinism (DONE)
+  - Confirmation: TTK uses `std::priority_queue` with a comparator equivalent to a min-heap on the lexicographic `lowVerts_` tuple (see `DiscreteGradient_Template.h`: `orderCells(a,b) { return a.lowVerts_ > b.lowVerts_; }`).
+  - Status in Julia: The implementation uses a min-heap via `BinaryHeap{CellExt}(LV_ORD)` where `lt` is lexicographic ascending, matching TTK’s effective semantics.
+  - Action: None required for parity; both use min-heap behavior. Keep comparator consistent and documented.
 
-2. Lower-star triangle discovery
+2. Lower-star triangle discovery (DONE)
    - Difference: Julia scans all triangles to find those incident to the pivot vertex.
    - Impact: Performance.
    - Action: Precompute and store vertex-to-triangle (vertex star) adjacency; or use `edge_to_triangles` plus incident edges to derive local triangles quickly.
 
-3. 3D support
+3. 3D support (NOT PLANNED)
    - Difference: Not implemented in Julia.
    - Action: If needed, extend `LowerStar` and `GradientField` to 3D cells; implement tetrahedra support with 3-face bookkeeping and 2-saddle/maximum classification.
 
@@ -183,7 +177,7 @@ High-level verdict: The Julia code captures the core ProcessLowerStars mechanics
 - What’s compliant:
   - Core ProcessLowerStars ideas are implemented correctly for 2D: lower-star construction, queue-based processing, pairing rules, and gradient storage. Critical point detection and 2D classification match TTK’s design.
 - What diverges:
-  - Queue ordering polarity (min vs max) may lead to different—but valid—pairings versus TTK’s exact results.
+  - Not heap polarity (now confirmed aligned). Differences may still arise from tie-breaking or local queue content timing, but not from heap min/max semantics.
   - Performance: Julia lacks triangulation preconditioning and parallelism; lower-star triangle discovery is O(n_tris) per vertex.
   - Feature coverage: 3D, path/separatrix/segmentation, persistence, and boundary metadata are not implemented (expected given scope).
 - Practical guidance:

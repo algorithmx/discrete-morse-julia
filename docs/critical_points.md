@@ -35,7 +35,7 @@ Data structures:
 - `LowerStar` / `CellExt` — Working sets for ProcessLowerStars per vertex.
 
 Support:
-- `get_critical_point_location`, `print_critical_point_summary`, `test_critical_point_detection()` — utilities and a simple test harness.
+- `get_critical_point_location`, `print_critical_point_summary` — utilities.
 
 
 ## End-to-end workflow
@@ -43,8 +43,10 @@ Support:
 ```mermaid
 flowchart TD
   A["Input: TriangleMesh, scalar_field, sos_offsets (optional), persistence_threshold tau (optional), rebuild_gradient_after_simplification (optional)"] --> B["sort_vertices_order"]
-  B --> B2["offsets"]
-  B2 --> C{tau > 0 AND rebuild?}
+  B --> B2["vertex_order"]
+  B2 --> C{"tau (persistence_threshold) > 0
+  AND
+  rebuild?"}
   C -- yes --> D["simplify_scalar_field_by_persistence!"]
   D --> D2["uses: compute_persistence_pairs_min_sad, compute_persistence_pairs_max_sad, flood_component_vertices"]
   D2 --> E["sort_vertices_order on edited scalars"]

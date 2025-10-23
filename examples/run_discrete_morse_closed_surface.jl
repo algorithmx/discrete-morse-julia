@@ -7,7 +7,7 @@ using LinearAlgebra
 using Plots
 
 # Bring in the algorithm and mesh utilities (OBJ writer)
-include(joinpath(@__DIR__, "discrete_morse_critical_points.jl"))
+include(joinpath(@__DIR__, "..", "discrete_morse_critical_points.jl"))
 include(joinpath(@__DIR__, "test_surface_generator.jl"))
 
 # ==============================================

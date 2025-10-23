@@ -22,6 +22,10 @@ using Test
 include("discrete_morse_critical_points.jl")
 include("morse_smale_surface_segmentation.jl")
 
+# Local ordering wrapper for tests: define a max-heap ordering on CellExt
+struct MaxLowerVertsOrderingLocal <: Base.Order.Ordering end
+Base.Order.lt(::MaxLowerVertsOrderingLocal, a::CellExt, b::CellExt) = a.lower_verts > b.lower_verts
+
 
 """
 Construct the standard 2-triangle mesh used across tests.
@@ -89,6 +93,39 @@ end
 
 function run_all_tests_1()
     @testset "Discrete Morse Theory - Unit Tests" begin
+        @testset "Heap Ordering Semantics" begin
+            # Prepare CellExt instances with distinct lexicographic lower_verts
+            cells = CellExt[
+                CellExt(1, 10, (3, -1, -1), (-1, -1, -1)),
+                CellExt(1, 11, (1, -1, -1), (-1, -1, -1)),
+                CellExt(1, 12, (2, -1, -1), (-1, -1, -1)),
+                CellExt(2, 20, (2, 1, -1), (-1, -1, -1)),
+                CellExt(2, 21, (2, 0, -1), (-1, -1, -1)),
+            ]
+
+            expectedAsc = [(1, -1, -1), (2, -1, -1), (2, 0, -1), (2, 1, -1), (3, -1, -1)]
+
+            # Min-heap with LV_ORD must pop in ascending lexicographic order
+            hmin = BinaryHeap{CellExt}(LV_ORD)
+            for c in cells
+                push!(hmin, c)
+            end
+            gotAsc = NTuple{3,Int}[]
+            while !isempty(hmin)
+                push!(gotAsc, pop!(hmin).lower_verts)
+            end
+            @test gotAsc == expectedAsc
+
+            hmax = BinaryHeap{CellExt}(MaxLowerVertsOrderingLocal())
+            for c in cells
+                push!(hmax, c)
+            end
+            gotDesc = NTuple{3,Int}[]
+            while !isempty(hmax)
+                push!(gotDesc, pop!(hmax).lower_verts)
+            end
+            @test gotDesc == reverse(expectedAsc)
+        end
         @testset "Basic Data Structures" begin
             # Cell creation and comparison
             c1 = Cell(0, 5)
